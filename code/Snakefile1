@@ -1,0 +1,42 @@
+import csv
+
+# Complete absolute path definitions
+PROJECT_ROOT = "/home/akash_gro/Spatial_RNA"
+SAMPLE_FILE = f"{PROJECT_ROOT}/resource/sample_name.txt"  # Fixed name mapping file here
+
+# Read sample mappings using Python's built-in csv module (no pandas)
+sample_name_mapps = {}
+with open(SAMPLE_FILE, mode="r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        sample_name_mapps[row["new_names"].strip()] = row["old_names"].strip()
+
+def sample_mapping(wildcards):
+    return sample_name_mapps[wildcards.s_n]
+
+rule all:
+    input:
+        expand(f"{PROJECT_ROOT}/output/trained_model/{{m_s}}_trained/epoch{{e}}.model_weights.pth", 
+               m_s=["GATL2", "GATv2", "GraphSAGE", "GAT"], 
+               e=[5, 10, 15])
+
+rule run_training:
+    input:
+        script = f"{PROJECT_ROOT}/code/run_GNN_training.py"
+    output:
+        out_model = f"{PROJECT_ROOT}/output/trained_model/{{m_s}}_trained/epoch{{e}}.model_weights.pth"
+    resources:
+        cpus = 1,
+        mem = 16000, 
+        gpus = 0     
+    log:
+        f"{PROJECT_ROOT}/output/trained_model/logs/{{m_s}}_epoch{{e}}.training.log"
+    benchmark:
+        f"{PROJECT_ROOT}/output/trained_model/logs/{{m_s}}_epoch{{e}}.training.ben.txt"
+    conda:
+        "dev-spatialrna" 
+    shell:
+        """
+        python -u {input.script} "{output.out_model}" {wildcards.e} {wildcards.m_s} 2>> {log}
+        """
+

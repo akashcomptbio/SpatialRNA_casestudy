@@ -1,0 +1,116 @@
+import csv
+import os
+
+PROJECT_ROOT = "/home/akash_gro/Spatial_RNA"
+SAMPLE_FILE = os.path.join(PROJECT_ROOT, "resource/sample_name.txt")
+
+# Load sample mappings using Python's built-in csv module (No pandas)
+sample_name_mapps = {}
+with open(SAMPLE_FILE, mode="r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        sample_name_mapps[row["new_names"].strip()] = row["old_names"].strip()
+
+ALL_SAMPLES = list(sample_name_mapps.keys())
+
+# Define explicit model scopes to match your rule all target
+MODELS = ["GATL2", "GATv2", "GraphSAGE", "GAT"]
+EPOCHS = [5, 10, 15]
+K_VAL = 12
+
+def sample_mapping(wildcards):
+    return sample_name_mapps[wildcards.s_n]
+
+# Cluster/Slurm memory metrics
+def get_mem_mb(wildcards, attempt): 
+    return 55000 + attempt * 5000
+
+def get_mem_mb_plot(wildcards, attempt): 
+    return 5000 + attempt * 5000
+
+def get_mem_cluster(wildcards, attempt): 
+    return 100000 + attempt * 45000
+
+
+rule all:
+    input: 
+        expand(os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/hex_plot/{s_n}.pdf"), 
+               k=K_VAL, s_n=ALL_SAMPLES, m_s=MODELS, e=EPOCHS)
+rule run_infer:
+    input:
+        script = os.path.join(PROJECT_ROOT, "code/run_infer_with_trained_model.py"),
+        data_path = os.path.join(PROJECT_ROOT, "data/{s_n}.csv/processed/{s_n}_data_tile0.pt"),
+        model_path = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}.model_weights.pth")
+    output:
+        npy_out = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/embeddings/{s_n}.npy")
+    resources:
+        cpus = 1, 
+        mem = get_mem_mb, 
+        gpus = 1,
+        slurm_extra = "--gres=gpu:1"
+    params:
+        slurm_out = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/embeddings/{s_n}.get.embs.slurm.out")
+    log:
+        os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/embeddings/{s_n}.get.embs.log")
+    benchmark:
+        os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/embeddings/{s_n}.get.embs.ben.txt")
+    shell:
+        # FIXED: Added a bash fallback logic ${VARIABLE:-default} to use GPU 0 locally 
+        # while safely preserving compatibility with Slurm cluster jobs
+        """
+        export CUDA_VISIBLE_DEVICES=${{SLURM_JOB_GPUS:-0}}
+        python -u {input.script} {wildcards.s_n} {input.data_path} {input.model_path} {output.npy_out} 2>> {log}
+        """
+
+
+rule run_gmm_cluster:
+    input:
+        # FIXED: Lambda safely limits wildcards to ONLY m_s and e, generating a static list of strings for input
+        all_npys = lambda wildcards: [os.path.join(PROJECT_ROOT, f"output/trained_model/{wildcards.m_s}_trained/epoch{wildcards.e}/embeddings/{sample}.npy") for sample in ALL_SAMPLES],
+        script = os.path.join(PROJECT_ROOT, "code/run_gmm.py")
+    output:
+        # FIXED: Uses double braces {{s_n}} to signal to Snakemake that s_n is NOT an active wildcard here. 
+        # Only {m_s}, {e}, and {k} are active wildcards across output, log, and benchmark fields.
+        gmm_outs = expand(os.path.join(PROJECT_ROOT, "output/trained_model/{{m_s}}_trained/epoch{{e}}/gmm_clusters/gmm{{k}}_trained/{sample}_noMeans.txt"), sample=ALL_SAMPLES)
+    params:
+        out_dir = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/"),
+        slurm_out = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained.slurm.out"),
+        gmm_out_csv = lambda wildcards: ",".join([os.path.join(PROJECT_ROOT, f"output/trained_model/{wildcards.m_s}_trained/epoch{wildcards.e}/gmm_clusters/gmm{wildcards.k}_trained/{sample}_noMeans.txt") for sample in ALL_SAMPLES]),
+        all_npys_csv = lambda wildcards: ",".join([os.path.join(PROJECT_ROOT, f"output/trained_model/{wildcards.m_s}_trained/epoch{wildcards.e}/embeddings/{sample}.npy") for sample in ALL_SAMPLES])
+    benchmark:
+        os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/gmm_global.ben.txt")
+    resources:
+        cpus = 1, mem = get_mem_cluster, gpus = 0
+    log:
+        os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/gmm_global.log")
+    shell:
+        """
+        python -u {input.script} "{params.all_npys_csv}" {wildcards.k} \
+            "{params.out_dir}" "{params.gmm_out_csv}" 2>> {log}
+        """
+rule plot_hex:
+    input:
+        cid_results = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/{s_n}_noMeans.txt"),
+        script = os.path.join(PROJECT_ROOT, "code/run_plot_hex.R"),
+        node_meta_file = os.path.join(PROJECT_ROOT, "data/{s_n}.csv/raw/{s_n}.csv")
+    output:
+        out_pdf = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/hex_plot/{s_n}.pdf")
+    log:
+        r_log = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/hex_plot/{s_n}.rlog")
+    params:
+        bin_thresh = 10,
+        bin_width = 5,
+        slurm_out = os.path.join(PROJECT_ROOT, "output/trained_model/{m_s}_trained/epoch{e}/gmm_clusters/gmm{k}_trained/hex_plot_{wildcards.s_n}.rlog_slurm.out")
+    resources:
+        cpus = 2, mem = get_mem_mb_plot, gpus = 0
+    shell:
+        """
+        Rscript {input.script} \
+            --args cid_results='\"{input.cid_results}\"' \
+            out_pdf='\"{output.out_pdf}\"' \
+            sample_name='\"{wildcards.s_n}\"' \
+            node_meta_file='\"{input.node_meta_file}\"' \
+            bin_thresh='\"{params.bin_thresh}\"' \
+            bin_width='\"{params.bin_width}\"' > {log.r_log} 2>&1
+        """
+

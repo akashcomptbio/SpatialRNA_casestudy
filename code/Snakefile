@@ -1,0 +1,67 @@
+sample_name_mapps = {}
+with open("../resource/sample_name.txt", "r") as f:
+    next(f)
+    for line in f:
+        if line.strip():
+            new_n, old_n = line.strip().split(",")
+            sample_name_mapps[new_n.strip()] = old_n.strip()
+
+def sample_mapping(wildcards):
+    return sample_name_mapps[wildcards.s_n]
+
+def get_mem_mb(wildcards, attempt):
+    return 8000 + attempt * 2000
+
+
+rule all:
+    input:
+        expand("../data/{s_n}.csv/subgraph/{s_n}_subgraph_data_tile0.pt", s_n=[new_sample for new_sample in sample_name_mapps.keys()])
+
+
+rule generate_graph:
+    input:
+        script = "../code/run_build_graph.py",
+        # FIXED: Added 'raw' to match PyTorch Geometric's layout exactly
+        raw_csv = "../data/{s_n}.csv/raw/{s_n}.csv"
+    output:
+        graph_data = "../data/{s_n}.csv/processed/{s_n}_data_tile0.pt"
+    resources:
+        cpus = 1,
+        mem = get_mem_mb,
+        gpus = 0
+    params:
+        slurm_out = "../output/build_graphs/logs/buildsample_data_{s_n}.slurm.out"
+    log:
+        "../output/build_graphs/logs/buildsample_data_{s_n}.log"
+    benchmark:
+        "../output/build_graphs/logs/buildsample_data_{s_n}.ben.txt"
+    conda:
+        "dev-spatialrna"
+    shell:
+        """
+            python -u {input.script} {wildcards.s_n} 2>> {log}
+        """
+
+
+rule generate_subgraph:
+    input:
+        script = "../code/run_sample_subgraph.py",
+        graph_data = "../data/{s_n}.csv/processed/{s_n}_data_tile0.pt"
+    output:
+        graph_data = "../data/{s_n}.csv/subgraph/{s_n}_subgraph_data_tile0.pt"
+    resources:
+        cpus = 1,
+        mem = get_mem_mb,
+        gpus = 0
+    params:
+        slurm_out = "../output/build_subgraphs/logs/buildsample_data_{s_n}.slurm.out"
+    log:
+        "../output/build_subgraphs/logs/buildsample_data_{s_n}.log"
+    benchmark:
+        "../output/build_subgraphs/logs/buildsample_data_{s_n}.ben.txt"
+    conda:
+        "dev-spatialrna"
+    shell:
+        """
+            python -u {input.script} {wildcards.s_n} 2>> {log}
+        """
